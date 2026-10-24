@@ -5,6 +5,7 @@ use crate::isobmff::codec::{CodecConfig, SampleEntry, TimecodeConfig};
 use crate::isobmff::demux::Edit;
 use crate::isobmff::error::{Error, Result};
 use std::io::{Read, Seek, SeekFrom, Write};
+mod c0_timing;
 
 /// Output flavor: determines brands and some sample-entry encodings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
