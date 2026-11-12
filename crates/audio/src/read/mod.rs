@@ -90,6 +90,25 @@ fn detect_by_magic(b: &[u8], depth: u32) -> Option<Container> {
     None
 }
 
+/// The file extensions of the formats [`decode`] reads, lower case and without the dot: what a
+/// file picker or a browser filters by. Each is a hint [`detect_container`] knows; a file's
+/// contents still decide what it is. Without the `symphonia` feature the formats only symphonia
+/// decodes (FLAC, MP3, CAF) are left out.
+#[cfg(feature = "symphonia")]
+pub const DECODE_EXTENSIONS: &[&str] = &[
+    "wav", "wave", "bwf", "rf64", "aif", "aiff", "aifc", "flac", "mp3", "mp2", "mp1", "mpa", "ogg", "oga", "opus", "m4a", "m4b", "mp4", "mov", "aac",
+    "adts", "ac3", "eac3", "ec3", "caf", "mkv", "mka", "webm",
+];
+/// The file extensions of the formats [`decode`] reads, lower case and without the dot: what a
+/// file picker or a browser filters by. Each is a hint [`detect_container`] knows; a file's
+/// contents still decide what it is. Without the `symphonia` feature the formats only symphonia
+/// decodes (FLAC, MP3, CAF) are left out.
+#[cfg(not(feature = "symphonia"))]
+pub const DECODE_EXTENSIONS: &[&str] = &[
+    "wav", "wave", "bwf", "rf64", "aif", "aiff", "aifc", "mp2", "mp1", "mpa", "ogg", "oga", "opus", "m4a", "m4b", "mp4", "mov", "aac", "adts", "ac3",
+    "eac3", "ec3", "mkv", "mka", "webm",
+];
+
 fn detect_by_ext(ext: &str) -> Option<Container> {
     Some(match ext.trim_start_matches('.').to_ascii_lowercase().as_str() {
         "wav" | "wave" | "bwf" | "rf64" => Container::Wav,
@@ -183,12 +202,13 @@ enum Inner<'a> {
 /// A file's audio, decoded block by block: the streaming counterpart of [`decode`], with seeking
 /// and track choice.
 ///
-/// Native formats (WAV, AIFF, AAC and PCM in MP4/MOV and Matroska/WebM, and raw ADTS streams)
-/// read their sample data from the source packet by packet. The container's packet index is held
-/// in memory (tens of bytes per packet), and opening a Matroska file or a raw ADTS stream reads
-/// through the whole file to build it; WAV and AIFF need no index. Formats symphonia decodes (MP1/MP2/MP3, FLAC, ALAC,
-/// Vorbis, CAF, ADPCM, A-law, µ-law) read the whole source into memory first; their decoded audio
-/// still streams.
+/// Native formats (WAV, AIFF, AAC, Opus, AC-3/E-AC-3, MP1/MP2 and PCM in MP4/MOV, Matroska/WebM and
+/// Ogg, and raw ADTS, AC-3 and MPEG audio streams) read their sample data from the source packet by
+/// packet. The container's packet index is held in memory (tens of bytes per packet), and opening
+/// an Ogg or Matroska file or a raw
+/// stream reads through the whole file to build it; WAV and AIFF need no index. Formats symphonia
+/// decodes (MP3, FLAC, ALAC, Vorbis, CAF, ADPCM, A-law, µ-law) read the whole source into memory
+/// first; their decoded audio still streams.
 ///
 /// ```no_run
 /// # fn demo() -> craft_audio::Result<()> {
