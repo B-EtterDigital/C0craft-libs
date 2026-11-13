@@ -1,8 +1,9 @@
 //! EMF+ (MS-EMFPLUS): GDI+ drawing records carried in EMF comment records.
 //!
-//! Most EMF+ files are *dual*: the same picture is also drawn with plain EMF records, which
-//! [`crate::emf`] already plays, so this reader ignores their EMF+ part. An *EMF+ only* file has
-//! nothing else to draw; for those this reader plays the records:
+//! Most EMF+ files are *dual*: the same picture is also drawn with plain EMF records as a
+//! fallback for GDI. Office draws metafiles with GDI+, which plays the EMF+ records and skips
+//! the plain ones (except after EmfPlusGetDC), and a fallback can be incomplete (a nested
+//! metafile it lacks), so this reader does the same. It plays the records:
 //! - brushes (solid, hatch, texture, linear and path gradients), pens, paths, images, fonts,
 //!   string formats and regions, including objects split across several records;
 //! - rectangles, polygons, lines, ellipses, paths and Béziers;
@@ -26,7 +27,7 @@
 use std::sync::Arc;
 
 use crate::bytes::Bytes;
-use crate::canvas::{BS_NULL, BS_SOLID, Brush, Canvas, LogFont, PS_NULL, Pen, RawTile, Xform, hatch_tile, mul};
+use crate::canvas::{BS_NULL, BS_SOLID, Brush, Canvas, LogFont, PS_NULL, Pen, RawTile, Xform, emfplus_hatch_tile, mul};
 use crate::canvas::{Raw, RawClip};
 use crate::cliprect::{MAX_AREA_CLIP_WORK, clip_polygon_within, convex, flatten, ops_bbox, pts_bbox, rect_poly};
 use crate::dib::Rgba;
@@ -216,8 +217,10 @@ struct Saved {
 }
 
 pub(crate) struct Plus {
-    /// An EMF+ header said the file is EMF+ only, so these records are the picture.
-    active: bool,
+    /// An EMF+ header said the file is dual: its plain EMF records are only a GDI fallback.
+    dual: bool,
+    /// An EmfPlusGetDC record opened a window of plain EMF records, until the next EMF+ record.
+    gdi: bool,
     dpi: f64,
     world: Xform,
     page: f64,
@@ -234,7 +237,8 @@ pub(crate) struct Plus {
 impl Plus {
     pub fn new() -> Self {
         Plus {
-            active: false,
+            dual: false,
+            gdi: false,
             dpi: 96.0,
             world: IDENTITY,
             page: 1.0,
@@ -247,8 +251,15 @@ impl Plus {
         }
     }
 
+    /// Whether the plain EMF record that follows is drawn: always, except in a dual file outside
+    /// an EmfPlusGetDC window.
+    pub fn plays_gdi(&self) -> bool {
+        !self.dual || self.gdi
+    }
+
     /// Plays the EMF+ records of one EMR_COMMENT payload (after the identifier).
     pub fn comment(&mut self, cv: &mut Canvas, data: Bytes) {
+        self.gdi = false;
         let mut pos = 0usize;
         while !cv.full() {
             let Some(tail) = data.0.get(pos..) else { break };
@@ -261,6 +272,8 @@ impl Plus {
                 break;
             }
             let Some(rec) = tail.slice(12, dsize) else { break };
+            // Any EMF+ record ends a GetDC window; EmfPlusGetDC opens it again for its own.
+            self.gdi = false;
             let _ = self.record(cv, typ, flags, Bytes(rec));
             let Some(next) = pos.checked_add(size) else { break };
             pos = next;
@@ -278,15 +291,15 @@ impl Plus {
 
     fn record(&mut self, cv: &mut Canvas, typ: u16, flags: u16, r: Bytes) -> Option<()> {
         if typ == 0x4001 {
-            // Header: dual files also draw with EMF records, which win.
-            self.active = flags & 1 == 0;
+            self.dual = flags & 1 != 0;
             if let Some(d) = r.u32(8).map(f64::from).filter(|d| *d > 0.0 && *d < 100_000.0) {
                 self.dpi = d;
             }
             return Some(());
         }
-        if !self.active {
-            return None;
+        if typ == 0x4004 {
+            self.gdi = true;
+            return Some(());
         }
         let done = match typ {
             0x4008 => self.object(flags, r, cv.used().saturating_add(self.clip_bytes())),
@@ -832,9 +845,11 @@ impl Painter {
                 cv.set_brush(Brush::new(BS_SOLID, *c));
                 cv.shape(ops.to_vec(), true, false);
             }
-            Fill::Hatch { style, fg, bg } => match hatch_tile(*style, *fg, Some(*bg)) {
+            Fill::Hatch { style, fg, bg } => match emfplus_hatch_tile(*style, *fg, Some(*bg)) {
                 Some(px) => cv.tile_shape(ops, Arc::new(RawTile { w: 8, h: 8, px, cell: cv.pattern_px })),
-                // GDI+ has many more hatch styles than GDI: those fill with the blend of both colours.
+                // Percentage styles are tiled above. The remaining GDI+ hatch styles have no tile
+                // mapping yet, so keep the existing blended-colour fallback instead of inventing
+                // a pattern that could disagree with the file.
                 None => {
                     cv.set_brush(Brush::new(BS_SOLID, lerp(*fg, *bg, 0.5)));
                     cv.shape(ops.to_vec(), true, false);
@@ -1629,7 +1644,6 @@ mod cost_tests {
     #[test]
     fn pieces_of_a_continued_object_count_against_the_shared_budget() {
         let (mut plus, mut cv) = (Plus::new(), Canvas::new());
-        plus.active = true;
         // Image object (kind 5), id 0, continued: 1000 bytes announced, 100 delivered.
         let mut rec = 1000u32.to_le_bytes().to_vec();
         rec.extend([0u8; 100]);
@@ -1640,7 +1654,6 @@ mod cost_tests {
     #[test]
     fn current_and_saved_clips_count_against_the_shared_budget() {
         let (mut plus, mut cv) = (Plus::new(), Canvas::new());
-        plus.active = true;
         let pts = vec![(0.0, 0.0); 1000];
         plus.clip = Some(pts.clone());
         plus.stack.push(Saved { id: 1, world: IDENTITY, page: 1.0, clip: Some(pts) });

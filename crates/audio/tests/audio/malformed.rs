@@ -324,7 +324,7 @@ fn mp4(frames: u32, entry: &[u8], swap: impl Fn(&[u8; 4], Vec<u8>) -> Vec<u8>) -
     };
     let ftyp = atom(b"ftyp", b"M4A \0\0\0\0M4A isom");
     let offset = (ftyp.len() + moov(0).len() + 8) as u32;
-    let pcm: Vec<u8> = (0..frames as i16).flat_map(|i| i.wrapping_mul(40).to_le_bytes()).collect();
+    let pcm: Vec<u8> = (0..frames).flat_map(|i| (i as i16).wrapping_mul(40).to_le_bytes()).collect();
     [ftyp, moov(offset), atom(b"mdat", &pcm)].concat()
 }
 
@@ -424,23 +424,26 @@ fn a_valid_mp3_with_incidental_container_magic_still_probes() {
     assert_eq!((info.codec, info.sample_rate, info.channels), (CodecId::Mp3, 44_100, 2));
 }
 
-/// Symphonia 0.6's CAF/FLAC/MP4 `Scoreable` implementations are unconditional
-/// (`Supported(255)`), so a container magic before the first audio frame *is* the reader the probe
-/// selects; there is no API to ask the probe to skip it. The preflight must therefore keep
-/// refusing an oversized CAF cookie instead of ignoring the marker and playing the MPEG frames
-/// behind it (which would also let a real malformed container bypass the size guard).
+/// MP3 frames are read natively (as MP1 and MP2 are), so a container marker in junk before the
+/// first frame does not hide the frames: the stream plays, and the bytes before it never reach
+/// symphonia, whose CAF, FLAC and MP4 probes would claim the stream at the marker. A file that
+/// starts with the container is read as that container whatever the hint, so its size checks
+/// still refuse an oversized CAF cookie.
 #[test]
-fn a_container_marker_before_the_first_audio_frame_is_the_probed_candidate() {
+fn a_container_marker_before_the_first_audio_frame_does_not_hide_the_frames() {
     let mut frame = vec![0u8; 417];
     frame[..4].copy_from_slice(&[0xFF, 0xFB, 0x90, 0x00]); // MPEG-1 Layer III, 128 kbps, 44.1 kHz, stereo
     let mp3: Vec<u8> = (0..8).flat_map(|_| frame.clone()).collect();
     let malformed = caf(&[caf_desc(b"aac ", 0, 1024, 2, 0), (b"kuki", 1i64 << 50, vec![0; 8])]);
     for f in [[vec![0u8], malformed.clone(), mp3.clone()].concat(), [vec![0u8; 32], malformed.clone(), mp3.clone()].concat()] {
-        // The hint still names the raw stream, but the probe sees the CAF marker first.
         assert_eq!(detect_container(&f, Some("mp3")), Some(Container::MpegAudio));
-        assert!(matches!(probe(&f, Some("mp3")), Err(AudioError::Malformed(m)) if m.contains("larger than the file")));
-        assert!(matches!(decode(&f, Some("mp3")), Err(AudioError::Malformed(m)) if m.contains("larger than the file")));
+        let info = probe(&f, Some("mp3")).expect("MP3 frames behind a container marker");
+        assert_eq!((info.codec, info.sample_rate, info.channels, info.frames), (CodecId::Mp3, 44_100, 2, 8 * 1152));
+        assert_eq!(decode(&f, Some("mp3")).expect("decode them").1.frames(), 8 * 1152);
     }
+    let f = [malformed, mp3.clone()].concat();
+    assert!(matches!(probe(&f, Some("mp3")), Err(AudioError::Malformed(m)) if m.contains("larger than the file")));
+    assert!(matches!(decode(&f, Some("mp3")), Err(AudioError::Malformed(m)) if m.contains("larger than the file")));
     // Plain leading junk without format magic is tolerated, as before.
     let f = [vec![0u8; 32], mp3].concat();
     assert_eq!(detect_container(&f, Some("mp3")), Some(Container::MpegAudio));
@@ -874,10 +877,10 @@ fn damaged_mp4_and_matroska_are_malformed() {
     }
 }
 
-/// MP3 in MP4 is decoded by symphonia (PCM, AAC, ALAC, Opus and AC-3 are native), so it reaches
-/// the checks in `read/mp4.rs`.
-fn mp3_mp4(frames: u32, swap: impl Fn(&[u8; 4], Vec<u8>) -> Vec<u8>) -> Vec<u8> {
-    mp4(frames, &sample_entry(b".mp3", 0, &[], &[]), swap)
+/// FLAC in MP4 is decoded by symphonia (PCM, AAC, ALAC, Opus, AC-3, MPEG audio are native), so
+/// it reaches the checks in `read/mp4.rs`.
+fn symphonia_mp4(frames: u32, swap: impl Fn(&[u8; 4], Vec<u8>) -> Vec<u8>) -> Vec<u8> {
+    mp4(frames, &sample_entry(b"fLaC", 0, &[], &[]), swap)
 }
 
 /// An `stts` atom of `n` one-sample runs.
@@ -886,25 +889,24 @@ fn one_sample_runs(n: u32) -> Vec<u8> {
 }
 
 /// soundcraft #1332: symphonia scans an audio track's `stts` table from its start for every
-/// packet, so a table of one-sample runs made decoding quadratic.
+/// packet, so a table of one-sample runs made decoding quadratic. The bound is on that work.
 #[test]
 fn an_audio_timing_table_with_a_run_per_sample_is_bounded() {
-    let frames = 1 << 14;
-    let at_bound = mp3_mp4(frames, |k, a| if k == b"stts" { one_sample_runs(frames) } else { a });
-    assert!(
-        !matches!(decode(&at_bound, None), Err(AudioError::Malformed(m)) if m.contains("timing table")),
-        "a table at the bound is not refused for its size"
-    );
-    let past = mp3_mp4(frames + 1, |k, a| if k == b"stts" { one_sample_runs(frames + 1) } else { a });
-    assert!(matches!(decode(&past, None), Err(AudioError::Malformed(m)) if m.contains("timing table")), "one run past the bound is refused");
+    let frames = 200_000;
+    let hostile = symphonia_mp4(frames, |k, a| if k == b"stts" { one_sample_runs(frames) } else { a });
+    let r = decode(&hostile, None);
+    assert!(matches!(&r, Err(AudioError::Malformed(m)) if m.contains("timing table")), "{:?}", r.map(|x| x.0));
+    // a table of many runs over few packets is cheap to scan, so it is not refused for its size
+    let few = symphonia_mp4(100, |k, a| if k == b"stts" { one_sample_runs(100_000) } else { a });
+    assert!(!matches!(decode(&few, None), Err(AudioError::Malformed(m)) if m.contains("timing table")));
 }
 
 /// The bound follows the sample entry, as symphonia decodes by it, not the handler.
 #[test]
 fn the_audio_timing_bound_follows_the_sample_entry_not_the_handler() {
     let video_handler = atom(b"hdlr", &[0u32, 0, u32::from_be_bytes(*b"vide"), 0, 0, 0, 0].map(u32::to_be_bytes).concat());
-    let frames = (1 << 14) + 1;
-    let f = mp3_mp4(frames, |k, a| match k {
+    let frames = 200_000;
+    let f = symphonia_mp4(frames, |k, a| match k {
         b"stts" => one_sample_runs(frames),
         b"hdlr" => video_handler.clone(),
         _ => a,
@@ -917,7 +919,7 @@ fn the_audio_timing_bound_follows_the_sample_entry_not_the_handler() {
 fn the_last_sample_entry_decides_whether_the_timing_bound_applies() {
     let video = sample_entry(b"avc1", 0, &[], &[]);
     let audio_stsd = atom(b"stsd", &[&[0, 0, 0, 0, 0, 0, 0, 1][..], &sample_entry(b".mp3", 0, &[], &[])].concat());
-    let frames = (1 << 14) + 1;
+    let frames = 200_000;
     let f = mp4(frames, &video, |k, a| if k == b"stts" { [audio_stsd.clone(), one_sample_runs(frames)].concat() } else { a });
     assert!(matches!(decode(&f, None), Err(AudioError::Malformed(m)) if m.contains("timing table")));
 }
