@@ -14,5 +14,5 @@ workspace = true
 craft-cfb = { workspace = true }
 craft-timeline = { workspace = true }
 # WAV and AIFF around embedded PCM essence: the one WAV/AIFF implementation, not a second one here.
-craft-audio = { workspace = true, features = ["decode-native", "pcm-encode"] }
+craft-audio = { workspace = true, features = ["pcm-decode", "pcm-encode"] }
 thiserror = { workspace = true }

@@ -19,7 +19,10 @@ workspace = true
 # µ-law and free-format MP3 through symphonia.
 decode = ["decode-native", "symphonia"]
 # `decode` without symphonia: only the formats with a native decoder (others are Unsupported).
-decode-native = ["aac-decode", "alac-decode", "opus-decode", "ac3-decode", "mpa-decode", "mp3-decode", "craft-media/isobmff", "craft-media/matroska", "craft-media/ogg", "dep:log", "dep:craft-xml"]
+# WAV and AIFF integer PCM only (`wav_pcm`, `aiff_pcm`, `RawPcm`), with no codec: for essence embedded in
+# other containers.
+pcm-decode = ["dep:log", "dep:craft-xml"]
+decode-native = ["pcm-decode", "aac-decode", "alac-decode", "opus-decode", "ac3-decode", "mpa-decode", "mp3-decode", "craft-media/isobmff", "craft-media/matroska", "craft-media/ogg", "dep:log", "dep:craft-xml"]
 # The symphonia fallback for the formats with no native decoder yet.
 symphonia = ["decode-native", "dep:symphonia"]
 # Every encoder: the lossless file writers and the AAC, ALAC, AC-3/E-AC-3, MP3 and Opus encoders.

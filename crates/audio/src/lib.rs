@@ -22,7 +22,7 @@
 //!   (`aac-encode`, `alac-encode`) and MP3, AC-3 and E-AC-3 streams (`mp3-encode`, `ac3-encode`,
 //!   `eac3-encode`), whole-buffer or incremental into any `Write + Seek`. Feature
 //!   `lossless-encode` turns on WAV, AIFF and FLAC; feature `encode` turns on every format and encoder.
-//! - [`wav_pcm`], [`aiff_pcm`] (feature `decode-native`) and [`pcm_wav_file`], [`pcm_wav_header`],
+//! - [`wav_pcm`], [`aiff_pcm`] (feature `decode-native` or `pcm-decode`) and [`pcm_wav_file`], [`pcm_wav_header`],
 //!   [`pcm_aiff_file`], [`pcm_aiff_header`] (feature `pcm-encode`): the integer PCM of a WAV or AIFF
 //!   file bit for bit, and minimal files around such PCM, for essence embedded in other containers.
 //! - [`peaks`] (feature `peaks`): min/max/RMS pyramid for waveform drawing.
@@ -48,7 +48,7 @@ pub mod mp3;
 pub mod mpa;
 #[cfg(any(feature = "opus-decode", feature = "opus-encode"))]
 pub mod opus;
-#[cfg(any(feature = "aac-decode", feature = "alac-decode", feature = "opus-decode", feature = "ac3-decode", feature = "mpa-decode"))]
+#[cfg(any(feature = "aac-decode", feature = "alac-decode", feature = "opus-decode", feature = "ac3-decode", feature = "mpa-decode", feature = "pcm-decode"))]
 mod pcm;
 #[cfg(feature = "peaks")]
 pub mod peaks;
@@ -56,11 +56,14 @@ pub mod peaks;
 pub mod qoa;
 #[cfg(feature = "decode-native")]
 mod read;
+// WAV and AIFF PCM readers on their own (`pcm-decode`), without the decoders `read` carries.
+#[cfg(all(feature = "pcm-decode", not(feature = "decode-native")))]
+mod read_pcm;
 #[cfg(any(feature = "aac-decode", feature = "alac-decode", feature = "opus-decode", feature = "ac3-decode", feature = "mpa-decode"))]
 mod track;
 #[cfg(feature = "vorbis-encode")]
 pub mod vorbis;
-#[cfg(any(feature = "decode-native", feature = "pcm-encode"))]
+#[cfg(any(feature = "decode-native", feature = "pcm-decode", feature = "pcm-encode"))]
 mod wav;
 /// Bounded WAV/RF64 cue, adtl and XMP marker metadata, without audio decoding.
 pub mod wav_markers;
@@ -132,6 +135,8 @@ pub use read::{
 };
 #[cfg(feature = "decode-native")]
 pub use read::{RawPcm, aiff_pcm, wav_pcm};
+#[cfg(all(feature = "pcm-decode", not(feature = "decode-native")))]
+pub use read_pcm::raw::{RawPcm, aiff_pcm, wav_pcm};
 #[cfg(any(feature = "aac-decode", feature = "alac-decode", feature = "opus-decode", feature = "ac3-decode", feature = "mpa-decode"))]
 pub use track::{LOOKAHEAD_PACKETS, TrackDecoder};
 #[cfg(any(
@@ -616,7 +621,7 @@ pub struct AudioInfo {
 
 impl AudioInfo {
     /// Info for a stream with `layout`'s channels and no BWF metadata.
-    #[cfg(feature = "decode-native")]
+    #[cfg(any(feature = "decode-native", feature = "pcm-decode"))]
     pub(crate) fn new(
         container: Container,
         codec: CodecId,

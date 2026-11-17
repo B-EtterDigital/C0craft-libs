@@ -151,7 +151,8 @@ impl TryFrom<RawLayout> for ChannelLayout {
     feature = "opus-decode",
     feature = "ac3-decode",
     feature = "mpa-decode",
-    feature = "pcm-encode"
+    feature = "pcm-encode",
+    feature = "pcm-decode"
 ))]
 pub(crate) fn count(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
